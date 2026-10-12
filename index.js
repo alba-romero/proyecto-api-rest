@@ -55,7 +55,9 @@ const swaggerOptions = {
         },
         servers: [
             {
-                url: 'http://localhost:3002'
+                url: process.env.VERCEL_URL
+      ? `https://${process.env.VERCEL_URL}`
+      : 'http://localhost:3002'
             }
         ],
         components: {
@@ -77,7 +79,11 @@ const swaggerSpec = swaggerJsdoc(swaggerOptions)
 app.use(express.json())
 app.use(cors())
 
-app.use('/api-docs', swaggerUi.serve, swaggerUi.setup(swaggerSpec))
+app.use(
+  '/api-docs',
+  swaggerUi.serveFiles(swaggerSpec),
+  swaggerUi.setup(swaggerSpec)
+)
 const PORT = process.env.PORT ?? 3002
 const DB_URL = process.env.MONGODB_URI ?? 'mongodb://localhost:27017'
 const DB_NAME = process.env.DB_NAME ?? 'api'
