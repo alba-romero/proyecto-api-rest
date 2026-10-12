@@ -4,8 +4,8 @@ import express from "express"
 import cors from "cors"
 import bcrypt from "bcryptjs"
 import jwt from "jsonwebtoken"
-import swaggerUi from 'swagger-ui-express'
 import swaggerJsdoc from 'swagger-jsdoc'
+import path from 'path'
 import { rateLimit } from 'express-rate-limit'
 const ACCESS_SECRET = process.env.JWT_ACCESS_SECRET
 const REFRESH_SECRET = process.env.JWT_REFRESH_SECRET
@@ -45,32 +45,25 @@ const loginLimiter = rateLimit({
 })
 
 
+
+
 const swaggerOptions = {
     definition: {
         openapi: '3.0.0',
-        info: {
-            title: 'API de gestión de tareas',
+        info: { title: 'API de gestión de tareas',
             version: '1.0.0',
-            description: 'API REST para gestionar usuarios y tareas'
-        },
+            description: 'API REST para gestionar usuarios y tareas'},
         servers: [
-            {
-                url: process.env.VERCEL_URL
-      ? `https://${process.env.VERCEL_URL}`
-      : 'http://localhost:3002'
-            }
-        ],
-        components: {
-            securitySchemes: {
+            { url: '/' }],
+        components: { securitySchemes: {
                 bearerAuth: {
                     type: 'http',
                     scheme: 'bearer',
                     bearerFormat: 'JWT'
                 }
-            }
-        }
+            } }
     },
-    apis: ['./index.js']
+    apis: [path.join(process.cwd(), 'index.js')]
 }
 
 const swaggerSpec = swaggerJsdoc(swaggerOptions)
@@ -79,11 +72,32 @@ const swaggerSpec = swaggerJsdoc(swaggerOptions)
 app.use(express.json())
 app.use(cors())
 
-app.use(
-  '/api-docs',
-  swaggerUi.serveFiles(swaggerSpec),
-  swaggerUi.setup(swaggerSpec)
-)
+const swaggerHtml = `<!DOCTYPE html>
+<html lang="es">
+<head>
+  <meta charset="UTF-8" />
+  <title>API de gestión de tareas</title>
+  <link rel="stylesheet" href="https://cdn.jsdelivr.net/npm/swagger-ui-dist@5.17.14/swagger-ui.css" />
+</head>
+<body>
+  <div id="swagger-ui"></div>
+  <script src="https://cdn.jsdelivr.net/npm/swagger-ui-dist@5.17.14/swagger-ui-bundle.js"></script>
+  <script src="https://cdn.jsdelivr.net/npm/swagger-ui-dist@5.17.14/swagger-ui-standalone-preset.js"></script>
+  <script>
+    window.onload = () => {
+      window.ui = SwaggerUIBundle({
+        url: '/api-docs.json',
+        dom_id: '#swagger-ui',
+        presets: [SwaggerUIBundle.presets.apis, SwaggerUIStandalonePreset],
+        layout: 'StandaloneLayout'
+      })
+    }
+  </script>
+</body>
+</html>`
+
+app.get('/api-docs.json', (request, response) => response.json(swaggerSpec))
+app.get('/api-docs', (request, response) => response.type('html').send(swaggerHtml))
 const PORT = process.env.PORT ?? 3002
 const DB_URL = process.env.MONGODB_URI ?? 'mongodb://localhost:27017'
 const DB_NAME = process.env.DB_NAME ?? 'api'
@@ -823,7 +837,11 @@ app.delete('/api/tareas/:id', verifyToken, async (request, response) => {
     })
 })
 
-app.listen(PORT, () => {
-    console.log(`Servidor web iniciado en puerto: ${PORT}`)
-})
+if (!process.env.VERCEL) {
+    app.listen(PORT, () => {
+        console.log(`Servidor web iniciado en puerto: ${PORT}`)
+    })
+}
+
+export default app
 
