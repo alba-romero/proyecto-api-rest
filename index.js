@@ -88,6 +88,7 @@ const swaggerHtml = `<!DOCTYPE html>
       window.ui = SwaggerUIBundle({
         url: '/api-docs.json',
         dom_id: '#swagger-ui',
+        validatorUrl: null,
         presets: [SwaggerUIBundle.presets.apis, SwaggerUIStandalonePreset],
         layout: 'StandaloneLayout'
       })
@@ -107,9 +108,10 @@ const TASKS = 'tareas'
 
 const client = new MongoClient(DB_URL)
 
+
 // Página inicial
 app.get("/", (request, response) => {
-    response.redirect("/api/tareas")
+    response.redirect("/api-docs")
 })
 
 // -------------- USUARIOS ------------------
