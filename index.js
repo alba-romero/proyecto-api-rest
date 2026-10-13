@@ -1,4 +1,3 @@
-
 import { MongoClient, ObjectId } from 'mongodb'
 import express from "express"
 import cors from "cors"
@@ -34,11 +33,25 @@ function verifyToken(request, response, next) {
 
 const app = express()
 
+// Necesario en Vercel (proxy) para que el rate limit vea la IP real del cliente
+app.set('trust proxy', 1)
+
 const loginLimiter = rateLimit({
     windowMs: 15 * 60 * 1000,
     limit: 5,
     message: {
         error: 'Demasiados intentos de inicio de sesión. Inténtalo de nuevo dentro de 15 minutos.'
+    },
+    standardHeaders: true,
+    legacyHeaders: false
+})
+
+// Límite general para toda la API: 100 peticiones cada 15 minutos por IP
+const apiLimiter = rateLimit({
+    windowMs: 15 * 60 * 1000,
+    limit: 100,
+    message: {
+        message: 'Demasiadas peticiones. Inténtalo de nuevo más tarde.'
     },
     standardHeaders: true,
     legacyHeaders: false
@@ -55,13 +68,68 @@ const swaggerOptions = {
             description: 'API REST para gestionar usuarios y tareas'},
         servers: [
             { url: '/' }],
-        components: { securitySchemes: {
-                bearerAuth: {
-                    type: 'http',
-                    scheme: 'bearer',
-                    bearerFormat: 'JWT'
-                }
-            } }
+        components: {
+    securitySchemes: {
+        bearerAuth: {
+            type: 'http',
+            scheme: 'bearer',
+            bearerFormat: 'JWT'
+        }
+    },
+    schemas: {
+        Tarea: {
+            type: 'object',
+            properties: {
+                _id: { type: 'string', example: '6acb65b02f4f78b1aacc31f2' },
+                titulo: { type: 'string', example: 'Estudiar para el examen' },
+                descripcion: { type: 'string', example: 'Repasar REST y JWT' },
+                completada: { type: 'boolean', example: false },
+                fechaLimite: { type: 'string', nullable: true, example: '2026-10-20' },
+                usuarioId: { type: 'string', example: '6acb5da72812188c162529bc' }
+            }
+        },
+        TareaInput: {
+            type: 'object',
+            required: ['titulo'],
+            properties: {
+                titulo: { type: 'string', example: 'Estudiar para el examen' },
+                descripcion: { type: 'string', example: 'Repasar REST y JWT' },
+                completada: { type: 'boolean', example: false },
+                fechaLimite: { type: 'string', example: '2026-10-20' }
+            }
+        },
+        Usuario: {
+            type: 'object',
+            properties: {
+                _id: { type: 'string', example: '6acb5da72812188c162529bc' },
+                nombre: { type: 'string', example: 'alumno1' },
+                email: { type: 'string', example: 'alumno1@example.com' }
+            }
+        },
+        LoginRequest: {
+            type: 'object',
+            required: ['email', 'password'],
+            properties: {
+                email: { type: 'string', example: 'prueba@gmail.com' },
+                password: { type: 'string', example: 'Prueba123' }
+            }
+        },
+        LoginResponse: {
+            type: 'object',
+            properties: {
+                message: { type: 'string', example: 'Inicio de sesión correcto' },
+                accessToken: { type: 'string' },
+                refreshToken: { type: 'string' }
+            }
+        },
+        MessageResponse: {
+            type: 'object',
+            properties: {
+                message: { type: 'string', example: 'Credenciales incorrectas' }
+            }
+        }
+    }
+}
     },
     apis: [path.join(process.cwd(), 'index.js')]
 }
@@ -71,6 +139,7 @@ const swaggerSpec = swaggerJsdoc(swaggerOptions)
 
 app.use(express.json())
 app.use(cors())
+app.use('/api', apiLimiter)
 
 const swaggerHtml = `<!DOCTYPE html>
 <html lang="es">
@@ -108,6 +177,10 @@ const TASKS = 'tareas'
 
 const client = new MongoClient(DB_URL)
 
+// Envuelve las rutas async para que cualquier error llegue al manejador de errores
+const asyncHandler = (fn) => (request, response, next) =>
+    Promise.resolve(fn(request, response, next)).catch(next)
+
 
 // Página inicial
 app.get("/", (request, response) => {
@@ -127,16 +200,22 @@ app.get("/", (request, response) => {
  *     responses:
  *       200:
  *         description: Lista de usuarios
+ *         content:
+ *           application/json:
+ *             schema:
+ *               type: array
+ *               items:
+ *                 $ref: '#/components/schemas/Usuario'
  */
 
-app.get('/api/usuarios', async (request, response) => {
+app.get('/api/usuarios', asyncHandler(async (request, response) => {
     const database = client.db(DB_NAME)
     const collection = database.collection(USERS)
 
-    const results = await collection.find({}).toArray()
+    const results = await collection.find({}, { projection: { password: 0 } }).toArray()
 
     response.status(200).json(results)
-})
+}))
 
 // POST: crear un usuario
 
@@ -171,14 +250,26 @@ app.get('/api/usuarios', async (request, response) => {
  *     responses:
  *       201:
  *         description: Usuario registrado
+ *         content:
+ *           application/json:
+ *             schema:
+ *               $ref: '#/components/schemas/Usuario'
  *       400:
  *         description: Datos obligatorios no proporcionados
+ *         content:
+ *           application/json:
+ *             schema:
+ *               $ref: '#/components/schemas/MessageResponse'
  *       409:
  *         description: El usuario o email ya existe
+ *         content:
+ *           application/json:
+ *             schema:
+ *               $ref: '#/components/schemas/MessageResponse'
  */
 
   
-app.post('/api/usuarios', async (request, response) => {
+app.post('/api/usuarios', asyncHandler(async (request, response) => {
     if (!request.is('json')) {
         return response.status(400).json({
             message: 'Debes proporcionar datos JSON'
@@ -224,14 +315,48 @@ app.post('/api/usuarios', async (request, response) => {
         nombre,
         email
     })
-})
+}))
 
 
 // GET: obtener un usuario por ID
 
 
 
-app.get('/api/usuarios/:id', async (request, response) => {
+/**
+ * @swagger
+ * /api/usuarios/{id}:
+ *   get:
+ *     summary: Obtener un usuario por su ID
+ *     tags: [Usuarios]
+ *     parameters:
+ *       - in: path
+ *         name: id
+ *         required: true
+ *         schema:
+ *           type: string
+ *         description: Identificador del usuario
+ *     responses:
+ *       200:
+ *         description: Usuario encontrado
+ *         content:
+ *           application/json:
+ *             schema:
+ *               $ref: '#/components/schemas/Usuario'
+ *       400:
+ *         description: ID no válido
+ *         content:
+ *           application/json:
+ *             schema:
+ *               $ref: '#/components/schemas/MessageResponse'
+ *       404:
+ *         description: Usuario no encontrado
+ *         content:
+ *           application/json:
+ *             schema:
+ *               $ref: '#/components/schemas/MessageResponse'
+ */
+
+app.get('/api/usuarios/:id', asyncHandler(async (request, response) => {
     const database = client.db(DB_NAME)
     const collection = database.collection(USERS)
 
@@ -243,9 +368,10 @@ app.get('/api/usuarios/:id', async (request, response) => {
         })
     }
 
-    const result = await collection.findOne({
-        _id: new ObjectId(id)
-    })
+    const result = await collection.findOne(
+        { _id: new ObjectId(id) },
+        { projection: { password: 0 } }
+    )
 
     if (!result) {
         return response.status(404).json({
@@ -254,7 +380,7 @@ app.get('/api/usuarios/:id', async (request, response) => {
     }
 
     response.status(200).json(result)
-})
+}))
 
 // PUT: actualizar un usuario
 
@@ -286,11 +412,19 @@ app.get('/api/usuarios/:id', async (request, response) => {
  *         description: Usuario modificado
  *       400:
  *         description: ID o datos no válidos
+ *         content:
+ *           application/json:
+ *             schema:
+ *               $ref: '#/components/schemas/MessageResponse'
  *       404:
  *         description: Usuario no encontrado
+ *         content:
+ *           application/json:
+ *             schema:
+ *               $ref: '#/components/schemas/MessageResponse'
  */
 
-app.put('/api/usuarios/:id', async (request, response) => {
+app.put('/api/usuarios/:id', asyncHandler(async (request, response) => {
     if (!request.is('json')) {
         return response.status(400).json({
             message: 'Debes proporcionar datos JSON'
@@ -321,7 +455,7 @@ app.put('/api/usuarios/:id', async (request, response) => {
     }
 
     response.status(200).json(results)
-})
+}))
 
 // DELETE: eliminar un usuario
 
@@ -342,11 +476,19 @@ app.put('/api/usuarios/:id', async (request, response) => {
  *         description: Usuario eliminado
  *       400:
  *         description: ID no válido
+ *         content:
+ *           application/json:
+ *             schema:
+ *               $ref: '#/components/schemas/MessageResponse'
  *       404:
  *         description: Usuario no encontrado
+ *         content:
+ *           application/json:
+ *             schema:
+ *               $ref: '#/components/schemas/MessageResponse'
  */
 
-app.delete('/api/usuarios/:id', async (request, response) => {
+app.delete('/api/usuarios/:id', asyncHandler(async (request, response) => {
     const { id } = request.params
 
     if (!ObjectId.isValid(id)) {
@@ -369,7 +511,7 @@ app.delete('/api/usuarios/:id', async (request, response) => {
     }
 
     response.status(200).json(results)
-})
+}))
 
 // -------------- TAREAS ------------------
 
@@ -384,16 +526,22 @@ app.delete('/api/usuarios/:id', async (request, response) => {
  *     responses:
  *       200:
  *         description: Lista de tareas
+ *         content:
+ *           application/json:
+ *             schema:
+ *               type: array
+ *               items:
+ *                 $ref: '#/components/schemas/Tarea'
  */
 
-app.get('/api/tareas', async (request, response) => {
+app.get('/api/tareas', asyncHandler(async (request, response) => {
     const database = client.db(DB_NAME)
     const collection = database.collection(TASKS)
 
     const results = await collection.find({}).toArray()
 
     response.status(200).json(results)
-})
+}))
 
 // POST: crear una tarea
 
@@ -410,33 +558,35 @@ app.get('/api/tareas', async (request, response) => {
  *       content:
  *         application/json:
  *           schema:
- *             type: object
- *             required:
- *               - titulo
- *             properties:
- *               titulo:
- *                 type: string
- *                 example: Estudiar para el examen
- *               descripcion:
- *                 type: string
- *                 example: Repasar REST y JWT
- *               completada:
- *                 type: boolean
- *                 example: false
- *               fechaLimite:
- *                 type: string
- *                 nullable: true
- *                 example: "2026-10-20"
+ *             $ref: '#/components/schemas/TareaInput'
  *     responses:
  *       201:
  *         description: Tarea creada
+ *         content:
+ *           application/json:
+ *             schema:
+ *               $ref: '#/components/schemas/Tarea'
+ *       400:
+ *         description: Datos no válidos o título no proporcionado
+ *         content:
+ *           application/json:
+ *             schema:
+ *               $ref: '#/components/schemas/MessageResponse'
  *       401:
  *         description: Token requerido
+ *         content:
+ *           application/json:
+ *             schema:
+ *               $ref: '#/components/schemas/MessageResponse'
  *       403:
  *         description: Token inválido o caducado
+ *         content:
+ *           application/json:
+ *             schema:
+ *               $ref: '#/components/schemas/MessageResponse'
  */
 
-app.post('/api/tareas', verifyToken, async (request, response) => {
+app.post('/api/tareas', verifyToken, asyncHandler(async (request, response) => {
     if (!request.is('json')) {
         return response.status(400).json({
             message: 'Debes proporcionar datos JSON'
@@ -468,7 +618,7 @@ app.post('/api/tareas', verifyToken, async (request, response) => {
         _id: results.insertedId,
         ...nuevaTarea
     })
-})
+}))
 
 /**
  * @swagger
@@ -482,30 +632,32 @@ app.post('/api/tareas', verifyToken, async (request, response) => {
  *       content:
  *         application/json:
  *           schema:
- *             type: object
- *             required:
- *               - email
- *               - password
- *             properties:
- *               email:
- *                 type: string
- *                 example: prueba@gmail.com
- *               password:
- *                 type: string
- *                 example: Prueba123
+ *             $ref: '#/components/schemas/LoginRequest'
  *     responses:
  *       200:
  *         description: Inicio de sesión correcto
+ *         content:
+ *           application/json:
+ *             schema:
+ *               $ref: '#/components/schemas/LoginResponse'
  *       400:
  *         description: Faltan datos o el JSON no es válido
+ *         content:
+ *           application/json:
+ *             schema:
+ *               $ref: '#/components/schemas/MessageResponse'
  *       401:
  *         description: Credenciales incorrectas
+ *         content:
+ *           application/json:
+ *             schema:
+ *               $ref: '#/components/schemas/MessageResponse'
  *       429:
  *         description: Demasiados intentos de inicio de sesión
  */
 
 
-app.post('/api/login', loginLimiter, async (request, response) => {
+app.post('/api/login', loginLimiter, asyncHandler(async (request, response) => {
     if (!request.is('json')) {
         return response.status(400).json({
             message: 'Debes proporcionar datos JSON'
@@ -565,7 +717,7 @@ app.post('/api/login', loginLimiter, async (request, response) => {
         accessToken,
         refreshToken
     })
-})
+}))
 
 
 /**
@@ -590,10 +742,25 @@ app.post('/api/login', loginLimiter, async (request, response) => {
  *     responses:
  *       200:
  *         description: Access token renovado correctamente
- *       400:
- *         description: Falta el refresh token
+ *         content:
+ *           application/json:
+ *             schema:
+ *               type: object
+ *               properties:
+ *                 accessToken:
+ *                   type: string
  *       401:
+ *         description: Refresh token requerido
+ *         content:
+ *           application/json:
+ *             schema:
+ *               $ref: '#/components/schemas/MessageResponse'
+ *       403:
  *         description: Refresh token inválido o caducado
+ *         content:
+ *           application/json:
+ *             schema:
+ *               $ref: '#/components/schemas/MessageResponse'
  */
 
 
@@ -654,13 +821,25 @@ app.post('/api/refresh', (request, response) => {
  *     responses:
  *       200:
  *         description: Tarea encontrada
+ *         content:
+ *           application/json:
+ *             schema:
+ *               $ref: '#/components/schemas/Tarea'
  *       400:
  *         description: ID no válido
+ *         content:
+ *           application/json:
+ *             schema:
+ *               $ref: '#/components/schemas/MessageResponse'
  *       404:
  *         description: Tarea no encontrada
+ *         content:
+ *           application/json:
+ *             schema:
+ *               $ref: '#/components/schemas/MessageResponse'
  */
 
-app.get('/api/tareas/:id', async (request, response) => {
+app.get('/api/tareas/:id', asyncHandler(async (request, response) => {
     const { id } = request.params
 
     if (!ObjectId.isValid(id)) {
@@ -683,7 +862,7 @@ app.get('/api/tareas/:id', async (request, response) => {
     }
 
     response.status(200).json(result)
-})
+}))
 
 // PUT: actualizar una tarea por ID
 
@@ -721,17 +900,37 @@ app.get('/api/tareas/:id', async (request, response) => {
  *     responses:
  *       200:
  *         description: Tarea modificada
+ *         content:
+ *           application/json:
+ *             schema:
+ *               $ref: '#/components/schemas/Tarea'
  *       400:
  *         description: Datos o ID no válidos
+ *         content:
+ *           application/json:
+ *             schema:
+ *               $ref: '#/components/schemas/MessageResponse'
  *       401:
  *         description: Token requerido
+ *         content:
+ *           application/json:
+ *             schema:
+ *               $ref: '#/components/schemas/MessageResponse'
  *       403:
  *         description: Token inválido o caducado
+ *         content:
+ *           application/json:
+ *             schema:
+ *               $ref: '#/components/schemas/MessageResponse'
  *       404:
  *         description: Tarea no encontrada
+ *         content:
+ *           application/json:
+ *             schema:
+ *               $ref: '#/components/schemas/MessageResponse'
  */
 
-app.put('/api/tareas/:id', verifyToken, async (request, response) => {
+app.put('/api/tareas/:id', verifyToken, asyncHandler(async (request, response) => {
     if (!request.is('json')) {
         return response.status(400).json({
             message: 'Debes proporcionar datos JSON'
@@ -779,7 +978,7 @@ app.put('/api/tareas/:id', verifyToken, async (request, response) => {
     })
 
     response.status(200).json(tareaActualizada)
-})
+}))
 
 // DELETE: eliminar una tarea por ID
 
@@ -801,17 +1000,37 @@ app.put('/api/tareas/:id', verifyToken, async (request, response) => {
  *     responses:
  *       200:
  *         description: Tarea eliminada
+ *         content:
+ *           application/json:
+ *             schema:
+ *               $ref: '#/components/schemas/MessageResponse'
  *       400:
  *         description: ID no válido
+ *         content:
+ *           application/json:
+ *             schema:
+ *               $ref: '#/components/schemas/MessageResponse'
  *       401:
  *         description: Token requerido
+ *         content:
+ *           application/json:
+ *             schema:
+ *               $ref: '#/components/schemas/MessageResponse'
  *       403:
  *         description: Token inválido o caducado
+ *         content:
+ *           application/json:
+ *             schema:
+ *               $ref: '#/components/schemas/MessageResponse'
  *       404:
  *         description: Tarea no encontrada
+ *         content:
+ *           application/json:
+ *             schema:
+ *               $ref: '#/components/schemas/MessageResponse'
  */
 
-app.delete('/api/tareas/:id', verifyToken, async (request, response) => {
+app.delete('/api/tareas/:id', verifyToken, asyncHandler(async (request, response) => {
     const { id } = request.params
 
     if (!ObjectId.isValid(id)) {
@@ -837,6 +1056,15 @@ app.delete('/api/tareas/:id', verifyToken, async (request, response) => {
         message: 'Tarea eliminada correctamente',
         ...results
     })
+}))
+
+// Manejador de errores: respuestas limpias en vez de peticiones colgadas
+app.use((error, request, response, next) => {
+    if (error.type === 'entity.parse.failed') {
+        return response.status(400).json({ message: 'JSON no válido' })
+    }
+    console.error(error)
+    response.status(500).json({ message: 'Error del servidor' })
 })
 
 if (!process.env.VERCEL) {
